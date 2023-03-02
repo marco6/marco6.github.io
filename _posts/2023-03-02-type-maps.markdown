@@ -1,0 +1,219 @@
+---
+layout: post
+title:  "Compile-time type maps"
+date:   2023-03-02 20:00:00 +0100
+tags: c++, metaprogramming, maps
+---
+
+C++'s metaprogramming is always a strange beast. It seems like there is no real limitation to its power and to the number of ways to screw that up.
+
+In this case, while working on al library I got an interesting problem for which, searching on google hasn't been really productive for me - at least in the few minutes I spent on finding out a decent query wording.
+
+So here is it: I needed a map from *types* to values. The reason for that is still obscure, but it was an interesting enough exercise to post here.
+
+The problem with using types as keys is that maps exploit at least two properties of the key:
+
+ - being able to check for equality
+ - and either
+   - being able to hash the key (getting a number which somehow represents the key);
+   - being able to order the key (knowing if a key is in some way "less then" another).
+
+Types do have have the first property: `std::is_same_v` from `<type_traits>` header easily gives that feature.
+
+What about the other one? Well... many options here actually.
+
+To get a *hash* value wich in some way represents the type - acknowledging that there will be collisions - is tricky. What are the properties of a type?
+
+ - the name;
+ - the members;
+ - its base classes;
+ - its **size**.
+
+Now, if we rule out the usage of `typeid` and of macros[^1], then, since C++23 didn't get (again) reflection, we are left only with `size`.
+
+[^1]: as everyone knows, macros are bad, evil and no one should ever use them otherwise the c++ all-seeing eye will look at you with pity and despair. :warning: BEWARE!
+
+While this sounds bad, it could actually work better than expected. However, implementing a hash map compile-time is a non-trivial job. And I really wanted something simple, just few lines of code, to refrain myself to write the usual write-once-blame-forever templated abomination.
+
+What about ordering? Turns out that `std::type_info` (returned by `typeid`) has a method called `before` for the very purpose of inserting in a sorted container. But again, I don't want my code to depend on RTTI and also those methods are not `constexpr`, so I can't use that at compile-time.
+
+There must be however another, easier, way. Let's find out.
+
+First of all, we let's define a `type_map` template which is characterized mainly by its contained value type:
+
+```c++
+template <typename TValue>
+struct type_map {
+    // All definitions are here so that we can depend
+    // on `TValue` without repeating it everywhere.
+};
+```
+
+So, each `entry` of a map needs to represent both the key and the value. This seems simple enough:
+
+```c++
+    template <typename TKey>
+    struct entry { TValue value; };
+```
+
+So, how can we have a map with two entries for two different keys? The idea: inheritance!
+
+I could easily write a map for keys `int`, `float` and `std::string` like:
+
+```c++
+    struct mymap: entry<int>, entry<float>, entry<std::string> {};
+```
+
+With this in mind, we can start to write a function to get the value associated with a type.
+
+The first thing to decide is: what should we do if the map doesn't contain the key? One could decide to throw in a `static_assert` to stop compilation or do something more SFINAE-friendly. On the other side, many maps allow to specify a "fallback" value to return if the key is not there. That seems like a reasonable way to simplify our interface.
+
+Regarding the function, it's quite easy to can come up with a code using an `if constexpr` clause to select at compile-time the right behavior:
+
+```c++
+template <typename TKey, typename TMap>
+constexpr static TValue get(const TMap& map, TValue fallback = {}) {
+    if constexpr (std::is_base_of_v<entry<TKey>, TMap>) {
+        const entry<TKey>& bucket = map; 
+        return bucket.value;
+    } else {
+        return fallback;
+    }
+}
+```
+
+For the set function, we need to think once again how this function will be used. It is clear that if we want things to be compile-time constant, we cannot mutate the state during the set phase. What we can do, instead, is return a new object with the new value.
+
+The last question to solve is: how can we set a key that doesn't have a bucket for yet? Luckily we can return a different type, based on a `if constexpr` clause thanks to `auto` meta-type. Something like this is enough:
+
+```c++
+template <typename TKey, typename TMap>
+constexpr static auto set(const TMap& map, TValue value) {
+    if constexpr (std::is_base_of_v<entry<TKey>, TMap>) {
+        auto newMap = map;
+        entry<TKey>& bucket = newMap;
+        bucket.value = value;
+        return newMap;
+    } else {
+        struct composed : TMap, entry<TKey> {};
+
+        return composed{ map, { value }};
+    }
+}
+```
+
+Now let's have a look at the whole implementation:
+
+```c++
+template <typename TValue>
+struct type_map {
+    template <typename TKey>
+    struct entry { TValue value; };
+
+    template <typename TKey, typename TMap>
+    constexpr static auto set(const TMap& map, TValue value) {
+        if constexpr (std::is_base_of_v<entry<TKey>, TMap>) {
+            auto newMap = map;
+            entry<TKey>& bucket = newMap;
+            bucket.value = value;
+            return newMap;
+        } else {
+            struct composed : TMap, entry<TKey> {};
+
+            return composed{ map, { value }};
+        }
+    }
+
+    template <typename TKey, typename TMap>
+    constexpr static TValue get(const TMap& map, TValue fallback = {}) {
+        if constexpr (std::is_base_of_v<entry<TKey>, TMap>) {
+            const entry<TKey>& bucket = map; 
+            return bucket.value;
+        } else {
+            return fallback;
+        }
+    }
+};
+```
+
+Less than 30 lines of code! Sweet.
+
+It's usage is still a bit ackward though:
+
+```c++
+constexpr auto mymap = type_map<int>::set<type2>(
+    type_map<int>::set<type1>(
+        type_map<int>::set<type2>(type_map<int>{}, 10), 
+        10
+    ),
+    20
+);
+
+constexpr auto type1value = type_map<int>::get<type1>(mymap); // = 10
+constexpr auto type2value = type_map<int>::get<type2>(mymap); // = 20
+constexpr auto notfound = type_map<int>::get<void>(mymap); // = 0
+```
+
+We can improve its usage by duplicating the `get` and `set` method and making it a template **member** function, instead of a free one. Unfortunately, we can't define a template member in a class defined in a function. However, we can simply extract the `composed` concept:
+
+```c++
+template <typename TValue>
+struct type_map {
+    template <typename TKey>
+    struct entry { TValue value; };
+
+    template <typename TMap, typename TKey>
+    struct composed : TMap, entry<TKey> {
+
+        using self = composed<TMap, TKey>;
+
+        template <typename T>
+        constexpr auto set(TValue value) const {
+            if constexpr (std::is_base_of_v<entry<T>, self>) {
+                auto newMap = *this;
+                entry<T>& bucket = newMap;
+                bucket.value = value;
+                return newMap;
+            } else {
+                return composed<self, T>{ *this, { value }};
+            }
+        }
+
+        template <typename T>
+        constexpr TValue get(TValue fallback = {}) const {
+            if constexpr (std::is_base_of_v<entry<T>, self>) {
+                const entry<T>& bucket = *this; 
+                return bucket.value;
+            } else {
+                return fallback;
+            }
+        }
+    };
+
+
+    template <typename TKey>
+    constexpr auto set(TValue value) {
+        return composed<type_map<TValue>, TKey>{ {}, { value }};
+    }
+
+    template <typename TKey>
+    constexpr TValue get(TValue fallback = {}) {
+        return fallback;
+    }
+};
+```
+
+Which brings us to a much better interface:
+
+```c++
+constexpr auto mymap = type_map<int>{}
+    .set<type2>(10)
+    .set<type1>(10)
+    .set<type2>(20);
+
+constexpr auto type1value = mymap.get<type1>(); // = 10
+constexpr auto type2value = mymap.get<type2>(); // = 20
+constexpr auto notfound = mymap.get<void>(); // = 0
+```
+
+Much better!
