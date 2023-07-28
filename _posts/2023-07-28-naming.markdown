@@ -1,0 +1,20 @@
+---
+layout: post
+title:  "Naming the Same Function, twice"
+date:   2023-07-28 10:00:00 +0100
+tags: naming, programming
+---
+
+Naming is hard, and things can get even harder when the same code can have more than one meaning.
+
+After all, bits, numbers and letters have no intrinsic meaning: they only gain meaning through the human interpretations we assign to them.
+
+I recall reading an article where a journalist couldn't grasp the concept that `10` in computer was actually `2`[^1]. While this might seem naive, it highlights a broader problem that often shows its complexity in unexpected places.
+
+Just a few weeks ago, I encountered a situation where I wrote a routine and noticed a repeating pattern. Naturally, I decided to encapsulate it within a function. However, the challenge arose when I realized there was no suitable name for this function. Although the code was the same, it was purely coincidental; the intent of that code and its semantics were entirely different, depending on where it was used.
+
+So here I am, after years of striving to reduce code duplication, writing something for my future self: sometimes, repeating the code might be the better approach. Not only does this simplify the naming process for the two functions, but it also enhances code readability. Additionally, it makes your code future-proof: if someone modifies one of the functions' semantics, it will not unintentionally affect an unrelated one.
+
+While adhering to the DRY (Don't Repeat Yourself) principle is generally beneficial, it's crucial to consider whether the semantics of the code will remain intact.
+
+[^1]: ok, to be fair, that journalist continued saying that math is not an exact science anymore as `10 == 2` holds true. Schooling failure I guess.
